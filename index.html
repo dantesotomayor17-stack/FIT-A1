@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FitTrack AI - Diario de Salud</title>
+    
+    <!-- Cargando Tailwind CSS para los estilos -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Cargando FontAwesome para los íconos -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Cargando React y ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- Cargando Babel para compilar JSX en el navegador -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        /* Animaciones personalizadas básicas */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.4s ease-out forwards;
+        }
+        /* Ocultar barra de scroll para estética móvil */
+        ::-webkit-scrollbar {
+            width: 0px;
+            background: transparent;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans antialiased">
+    
+    <!-- Contenedor principal de la aplicación -->
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function FitTrackApp() {
+            const [activeTab, setActiveTab] = useState('dashboard');
+            
+            // Estado del Perfil y Calorías
+            const [profile, setProfile] = useState({ weight: 90, height: 170, age: 30, gender: 'M', activity: 'sedentary' });
+            const [calorieLimit, setCalorieLimit] = useState(2200);
+
+            // Estado para el agua y pasos
+            const [water, setWater] = useState(0); // en vasos (250ml)
+            const [steps, setSteps] = useState(0);
+            const goalSteps = 10000;
+            const goalWater = 8; // 8 vasos = 2 litros
+
+            // Estado para las comidas
+            const [meals, setMeals] = useState([]);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const fileInputRef = useRef(null);
+
+            // Estado para el sueño y ayuno
+            const [sleepStart, setSleepStart] = useState('');
+            const [sleepEnd, setSleepEnd] = useState('');
+            const [fastingActive, setFastingActive] = useState(false);
+            const [fastingStartTime, setFastingStartTime] = useState(null);
+            const [fastingPlan, setFastingPlan] = useState(16); // Plan de ayuno en horas
+            const [fastingHoursLeft, setFastingHoursLeft] = useState(16);
+
+            const handleImageUpload = async (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                setIsAnalyzing(true);
+                try {
+                    // Convertir la imagen a Base64
+                    const base64Data = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            const base64String = reader.result.split(',')[1];
+                            resolve(base64String);
+                        };
+                        reader.onerror = reject;
+                        reader.readAsDataURL(file);
+                    });
+
+                    const prompt = `Analiza esta imagen de comida. Devuelve SOLO un objeto JSON con dos propiedades: 
+                    1. "description": Un nombre corto y descriptivo del platillo.
+                    2. "calories": Un número entero con las calorías estimadas.
+                    No incluyas texto extra, ni bloques de código markdown, solo el JSON puro.`;
+
+                    const payload = {
+                        contents: [
+                            {
+                                role: "user",
+                                parts: [
+                                    { text: prompt },
+                                    { inlineData: { mimeType: file.type, data: base64Data } }
+                                ]
+                            }
+                        ]
+                    };
+
+                    // IMPORTANTE: Para que funcione en GitHub, debes poner tu API Key de Gemini aquí.
+                    const apiKey = ""; 
+                    const apiUrl = https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey};
+                    
+                    if(!apiKey) {
+                        alert("Falta configurar la API Key de Gemini en el código para analizar las fotos.");
+                        throw new Error("API Key missing");
+                    }
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const result = await response.json();
+                    
+                    if (result.candidates && result.candidates[0].content.parts[0].text) {
+                        let jsonText = result.candidates[0].content.parts[0].text;
+                        jsonText = jsonText.replace(/json/g, '').replace(//g, '').trim();
+                        const data = JSON.parse(jsonText);
+                        
+                        const imageUrl = URL.createObjectURL(file);
+                        setMeals([{
+                            id: Date.now(),
+                            image: imageUrl,
+                            description: data.description || "Comida identificada",
+                            calories: data.calories || 0,
+                            time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+                        }, ...meals]);
+                    }
+                } catch (error) {
+                    console.error("Error al analizar:", error);
+                    const imageUrl = URL.createObjectURL(file);
+                    setMeals([{
+                        id: Date.now(),
+                        image: imageUrl,
+                        description: "Registro Manual (Fallo API)",
+                        calories: 300,
+                        time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+                    }, ...meals]);
+                } finally {
+                    setIsAnalyzing(false);
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                }
+            };
+
+            useEffect(() => {
+                let interval;
+                if (fastingActive && fastingStartTime) {
+                    interval = setInterval(() => {
+                        const now = new Date().getTime();
+                        const start = new Date(fastingStartTime).getTime();
+                        const diff = now - start;
+                        const hoursPassed = diff / (1000 * 60 * 60);
+                        const remaining = Math.max(0, fastingPlan - hoursPassed); 
+                        
+                        setFastingHoursLeft(remaining);
+                        
+                        if (remaining === 0) {
+                            setFastingActive(false);
+                            console.log("¡Ayuno completado!");
+                        }
+                    }, 60000);
+                }
+                return () => clearInterval(interval);
+            }, [fastingActive, fastingStartTime, fastingPlan]);
+
+            const toggleFasting = () => {
+                if (!fastingActive) {
+                    setFastingStartTime(new Date().toISOString());
+                    setFastingHoursLeft(fastingPlan);
+                }
+                setFastingActive(!fastingActive);
+            };
+
+            const totalCalories = meals.reduce((acc, meal) => acc + meal.calories, 0);
+            
+            const calculateSleep = () => {
+                if (!sleepStart || !sleepEnd) return "0 hrs";
+                const start = new Date(2000-01-01T${sleepStart});
+                let end = new Date(2000-01-01T${sleepEnd});
+                if (end < start) end.setDate(end.getDate() + 1);
+                const diff = (end - start) / (1000 * 60 * 60);
+                return ${diff.toFixed(1)} hrs;
+            };
+
+            const calculateTDEE = () => {
+                let tmb = (10 * profile.weight) + (6.25 * profile.height) - (5 * profile.age);
+                tmb = profile.gender === 'M' ? tmb + 5 : tmb - 161;
+                
+                const activityMultipliers = {
+                    sedentary: 1.2,
+                    light: 1.375,
+                    moderate: 1.55,
+                    active: 1.725
+                };
+                
+                const tdee = tmb * activityMultipliers[profile.activity];
+                const deficitGoal = Math.round(tdee - 500);
+                setCalorieLimit(deficitGoal);
+            };
+
+            const renderDashboard = () => (
+                <div className="space-y-6 animate-fade-in pb-8">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+                        <h2 className="text-xl font-bold text-gray-800 mb-4">Resumen del Día</h2>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="bg-blue-50 p-4 rounded-2xl">
+                                <div className="flex items-center gap-2 text-blue-600 mb-2">
+                                    <i className="fa-solid fa-droplet text-xl"></i>
+                                    <span className="font-semibold">Agua</span>
+                                </div>
+                                <div className="text-2xl font-bold text-blue-900">{water} <span className="text-sm font-normal">/ {goalWater}</span></div>
+                                <div className="w-full bg-blue-200 rounded-full h-2 mt-2">
+                                    <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: ${Math.min(100, (water/goalWater)*100)}% }}></div>
+                                </div>
+                                <div className="flex justify-between mt-3">
+                                    <button onClick={() => setWater(Math.max(0, water - 1))} className="p-1 px-2 bg-white rounded-full text-blue-600 hover:bg-blue-100 shadow-sm"><i className="fa-solid fa-minus"></i></button>
+                                    <button onClick={() => setWater(water + 1)} className="p-1 px-2 bg-blue-500 rounded-full text-white hover:bg-blue-600 shadow-sm"><i className="fa-solid fa-plus"></i></button>
+                                </div>
+                            </div>
+                            
+                            <div className="bg-green-50 p-4 rounded-2xl">
+                                <div className="flex items-center gap-2 text-green-600 mb-2">
+                                    <i className="fa-solid fa-bolt text-xl"></i>
+                                    <span className="font-semibold">Pasos</span>
+                                </div>
+                                <div className="text-2xl font-bold text-green-900">{steps}</div>
+                                <div className="w-full bg-green-200 rounded-full h-2 mt-2">
+                                    <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: ${Math.min(100, (steps/goalSteps)*100)}% }}></div>
+                                </div>
+                                <div className="flex justify-between mt-3 gap-2">
+                                    <input 
+                                        type="number" 
+                                        value={steps === 0 ? '' : steps}
+                                        onChange={(e) => setSteps(Number(e.target.value))}
+                                        placeholder="Ej. 8500"
+                                        className="w-2/3 bg-white border border-green-200 rounded-xl p-1 px-2 text-sm text-green-900 focus:outline-none focus:border-green-500 font-semibold"
+                                    />
+                                    <button onClick={() => setSteps(steps + 500)} className="w-1/3 py-1 text-xs bg-green-500 rounded-xl text-white hover:bg-green-600 shadow-sm font-bold">+500</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className={p-6 rounded-3xl shadow-md text-white ${totalCalories > calorieLimit ? 'bg-gradient-to-r from-red-500 to-red-600' : 'bg-gradient-to-r from-indigo-500 to-purple-600'}}>
+                        <div className="flex justify-between items-center mb-2">
+                            <h3 className={font-semibold ${totalCalories > calorieLimit ? 'text-red-100' : 'text-indigo-100'}}>Calorías Consumidas</h3>
+                            <i className={fa-solid fa-utensils text-xl ${totalCalories > calorieLimit ? 'text-red-200' : 'text-indigo-200'}}></i>
+                        </div>
+                        <div className="text-4xl font-bold">{totalCalories} <span className={text-lg font-normal ${totalCalories > calorieLimit ? 'text-red-200' : 'text-indigo-200'}}>/ {calorieLimit} kcal</span></div>
+                        
+                        <div className="w-full bg-white/20 rounded-full h-2 mt-4">
+                            <div className={h-2 rounded-full transition-all ${totalCalories > calorieLimit ? 'bg-red-300' : 'bg-white'}} style={{ width: ${Math.min(100, (totalCalories/calorieLimit)*100)}% }}></div>
+                        </div>
+                        <p className="text-sm mt-3 font-medium">
+                            {totalCalories > calorieLimit 
+                                ? ⚠️ Te has excedido por ${totalCalories - calorieLimit} kcal 
+                                : 🎯 Te faltan ${calorieLimit - totalCalories} kcal para tu límite}
+                        </p>
+                    </div>
+                </div>
+            );
+
+            const renderFood = () => (
+                <div className="space-y-6 animate-fade-in pb-8">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 text-center">
+                        <div className="mb-4">
+                            <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-3">
+                                <i className="fa-solid fa-camera text-3xl"></i>
+                            </div>
+                            <h2 className="text-xl font-bold text-gray-800">Registrar Comida</h2>
+                            <p className="text-gray-500 text-sm mt-1">Sube una foto y la IA calculará las calorías.</p>
+                        </div>
+                        
+                        <input 
+                            type="file" 
+                            accept="image/*" 
+                            className="hidden" 
+                            ref={fileInputRef}
+                            onChange={handleImageUpload}
+                        />
+                        <button 
+                            onClick={() => fileInputRef.current.click()}
+                            disabled={isAnalyzing}
+                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-6 rounded-2xl flex items-center justify-center gap-2 transition-colors disabled:opacity-70"
+                        >
+                            {isAnalyzing ? (
+                                <><div className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full"></div> Analizando...</>
+                            ) : (
+                                <><i className="fa-solid fa-camera text-lg"></i> Tomar Foto / Subir</>
+                            )}
+                        </button>
+                    </div>
+
+                    <div className="space-y-4">
+                        <h3 className="font-bold text-gray-700 px-2">Comidas de Hoy</h3>
+                        {meals.length === 0 ? (
+                            <div className="text-center py-8 text-gray-400 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                                Aún no has registrado comidas hoy.
+                            </div>
+                        ) : (
+                            meals.map((meal) => (
+                                <div key={meal.id} className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex gap-4 items-center">
+                                    <img src={meal.image} alt={meal.description} className="w-20 h-20 object-cover rounded-xl bg-gray-100" />
+                                    <div className="flex-1">
+                                        <h4 className="font-semibold text-gray-800 capitalize">{meal.description}</h4>
+                                        <p className="text-indigo-600 font-bold">{meal.calories} kcal</p>
+                                        <p className="text-xs text-gray-400 mt-1 flex items-center gap-1"><i className="fa-solid fa-clock"></i> {meal.time}</p>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            );
+
+            const renderSleepFasting = () => (
+                <div className="space-y-6 animate-fade-in pb-8">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+                        <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                            <i className="fa-solid fa-clock text-orange-500 text-2xl"></i> Ayuno Intermitente
+                        </h2>
+                        
+                        {!fastingActive && (
+                            <div className="mb-4 p-4 bg-orange-50 rounded-2xl">
+                                <label className="block text-sm font-semibold text-orange-800 mb-2">Selecciona tu Plan:</label>
+                                <select 
+                                    value={fastingPlan} 
+                                    onChange={(e) => setFastingPlan(Number(e.target.value))}
+                                    className="w-full bg-white border border-orange-200 rounded-xl p-2 text-gray-700 focus:outline-none focus:border-orange-500"
+                                >
+                                    <option value={12}>12:12 (Principiante - 12 horas)</option>
+                                    <option value={14}>14:10 (Intermedio - 14 horas)</option>
+                                    <option value={16}>16:8 (Popular - 16 horas)</option>
+                                    <option value={18}>18:6 (Avanzado - 18 horas)</option>
+                                    <option value={20}>20:4 (Guerrero - 20 horas)</option>
+                                </select>
+                            </div>
+                        )}
+
+                        <div className="text-center py-4">
+                            <div className="text-5xl font-light text-gray-800 mb-2 font-mono">
+                                {fastingActive 
+                                    ? ${Math.floor(fastingHoursLeft)}h ${Math.floor((fastingHoursLeft % 1) * 60)}m
+                                    : ${fastingPlan}:00}
+                            </div>
+                            <p className="text-gray-500 mb-6">
+                                {fastingActive ? "Tiempo restante para comer" : Meta de ayuno: ${fastingPlan} horas}
+                            </p>
+                            
+                            <button 
+                                onClick={toggleFasting}
+                                className={`w-full font-semibold py-4 px-6 rounded-2xl flex items-center justify-center gap-2 transition-all ${
+                                    fastingActive 
+                                        ? "bg-red-100 text-red-600 hover:bg-red-200" 
+                                        : "bg-orange-500 text-white hover:bg-orange-600"
+                                }`}
+                            >
+                                {fastingActive ? <><i className="fa-solid fa-stop text-lg"></i> Terminar Ayuno</> : <><i className="fa-solid fa-play text-lg"></i> Iniciar Ayuno Ahora</>}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="bg-slate-900 p-6 rounded-3xl shadow-sm text-white">
+                        <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+                            <i className="fa-solid fa-moon text-blue-300 text-2xl"></i> Registro de Sueño
+                        </h2>
+                        
+                        <div className="grid grid-cols-2 gap-4 mb-4">
+                            <div>
+                                <label className="block text-slate-400 text-sm mb-1">Me dormí a las:</label>
+                                <input 
+                                    type="time" 
+                                    value={sleepStart}
+                                    onChange={(e) => setSleepStart(e.target.value)}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-slate-400 text-sm mb-1">Me desperté a las:</label>
+                                <input 
+                                    type="time" 
+                                    value={sleepEnd}
+                                    onChange={(e) => setSleepEnd(e.target.value)}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-white focus:outline-none focus:border-blue-500"
+                                />
+                            </div>
+                        </div>
+                        
+                        <div className="bg-slate-800 p-4 rounded-xl flex items-center justify-between">
+                            <span className="text-slate-300">Total descansado:</span>
+                            <span className="text-xl font-bold text-blue-300">{calculateSleep()}</span>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderProfile = () => (
+                <div className="space-y-6 animate-fade-in pb-8">
+                    <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+                        <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                            <i className="fa-solid fa-user text-blue-500 text-2xl"></i> Mi Perfil Biométrico
+                        </h2>
+                        <p className="text-gray-500 text-sm mb-6">Ingresa tus datos para calcular automáticamente tu límite de calorías ideal para perder peso (Déficit de 500 kcal).</p>
+                        
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-gray-600 text-sm font-semibold mb-1">Peso (kg)</label>
+                                    <input type="number" value={profile.weight} onChange={(e) => setProfile({...profile, weight: Number(e.target.value)})} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 focus:outline-none focus:border-blue-500" />
+                                </div>
+                                <div>
+                                    <label className="block text-gray-600 text-sm font-semibold mb-1">Estatura (cm)</label>
+                                    <input type="number" value={profile.height} onChange={(e) => setProfile({...profile, height: Number(e.target.value)})} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 focus:outline-none focus:border-blue-500" />
+                                </div>
+                                <div>
+                                    <label className="block text-gray-600 text-sm font-semibold mb-1">Edad</label>
+                                    <input type="number" value={profile.age} onChange={(e) => setProfile({...profile, age: Number(e.target.value)})} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 focus:outline-none focus:border-blue-500" />
+                                </div>
+                                <div>
+                                    <label className="block text-gray-600 text-sm font-semibold mb-1">Sexo</label>
+                                    <select value={profile.gender} onChange={(e) => setProfile({...profile, gender: e.target.value})} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 focus:outline-none focus:border-blue-500">
+                                        <option value="M">Hombre</option>
+                                        <option value="F">Mujer</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-gray-600 text-sm font-semibold mb-1">Nivel de Actividad Diaria</label>
+                                <select value={profile.activity} onChange={(e) => setProfile({...profile, activity: e.target.value})} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 focus:outline-none focus:border-blue-500">
+                                    <option value="sedentary">Sedentario (Trabajo de oficina)</option>
+                                    <option value="light">Ligero (1-3 días de ejercicio)</option>
+                                    <option value="moderate">Moderado (3-5 días de ejercicio)</option>
+                                    <option value="active">Activo (6-7 días de ejercicio)</option>
+                                </select>
+                            </div>
+
+                            <button 
+                                onClick={calculateTDEE}
+                                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-2xl flex items-center justify-center gap-2 mt-4"
+                            >
+                                <i className="fa-solid fa-floppy-disk text-lg"></i> Guardar y Calcular Límite
+                            </button>
+                        </div>
+
+                        <div className="mt-6 p-4 bg-blue-50 rounded-2xl border border-blue-100 flex items-center gap-4">
+                            <div className="bg-blue-500 text-white p-3 rounded-xl"><i className="fa-solid fa-bullseye text-2xl"></i></div>
+                            <div>
+                                <p className="text-blue-900 text-sm font-semibold">Tu Límite Diario (Déficit)</p>
+                                <p className="text-2xl font-bold text-blue-700">{calorieLimit} <span className="text-sm font-normal">kcal</span></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen flex justify-center pb-24">
+                    <div className="w-full max-w-md flex flex-col min-h-screen">
+                        
+                        <header className="px-6 pt-12 pb-6 bg-white rounded-b-[2rem] shadow-sm mb-6 z-10 sticky top-0">
+                            <h1 className="text-2xl font-extrabold bg-gradient-to-r from-indigo-600 to-blue-500 bg-clip-text text-transparent">
+                                FitTrack AI
+                            </h1>
+                            <p className="text-gray-500 text-sm mt-1">Tu diario de salud inteligente</p>
+                        </header>
+
+                        <main className="flex-1 px-6 overflow-y-auto">
+                            {activeTab === 'dashboard' && renderDashboard()}
+                            {activeTab === 'food' && renderFood()}
+                            {activeTab === 'sleep' && renderSleepFasting()}
+                            {activeTab === 'profile' && renderProfile()}
+                        </main>
+
+                        <nav className="fixed bottom-0 w-full max-w-md bg-white border-t border-gray-100 rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.05)] px-4 py-4 flex justify-between items-center z-50 left-1/2 -translate-x-1/2">
+                            <button 
+                                onClick={() => setActiveTab('dashboard')}
+                                className={flex flex-col items-center gap-1 p-2 w-14 transition-colors ${activeTab === 'dashboard' ? 'text-indigo-600' : 'text-gray-400 hover:text-gray-600'}}
+                            >
+                                <i className="fa-solid fa-chart-line text-xl"></i>
+                                <span className="text-[10px] font-medium mt-1">Resumen</span>
+                            </button>
+                            
+                            <button 
+                                onClick={() => setActiveTab('food')}
+                                className={flex flex-col items-center gap-1 p-2 w-14 transition-colors ${activeTab === 'food' ? 'text-indigo-600' : 'text-gray-400 hover:text-gray-600'}}
+                            >
+                                <div className={w-14 h-14 flex items-center justify-center rounded-full -mt-10 shadow-lg border-4 border-white ${activeTab === 'food' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-500'}}>
+                                    <i className="fa-solid fa-camera text-xl"></i>
+                                </div>
+                                <span className="text-[10px] font-medium mt-1">Comida</span>
+                            </button>
+
+                            <button 
+                                onClick={() => setActiveTab('sleep')}
+                                className={flex flex-col items-center gap-1 p-2 w-14 transition-colors ${activeTab === 'sleep' ? 'text-indigo-600' : 'text-gray-400 hover:text-gray-600'}}
+                            >
+                                <i className="fa-solid fa-moon text-xl"></i>
+                                <span className="text-[10px] font-medium mt-1">Descanso</span>
+                            </button>
+
+                            <button 
+                                onClick={() => setActiveTab('profile')}
+                                className={flex flex-col items-center gap-1 p-2 w-14 transition-colors ${activeTab === 'profile' ? 'text-indigo-600' : 'text-gray-400 hover:text-gray-600'}}
+                            >
+                                <i className="fa-solid fa-user text-xl"></i>
+                                <span className="text-[10px] font-medium mt-1">Perfil</span>
+                            </button>
+                        </nav>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<FitTrackApp />);
+    </script>
+</body>
+</html>
